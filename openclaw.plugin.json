@@ -1,0 +1,27 @@
+{
+  "id": "read-guardrail",
+  "name": "Read Guardrail",
+  "version": "1.3.4",
+  "description": "Enforces read-only workspace isolation for the social agent. Guards read, image, pdf, and diffs tools via before_tool_call hook with allowlist-based path validation.",
+  "main": "index.ts",
+  "hooks": ["before_tool_call"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "Enable or disable the read guardrail plugin."
+      },
+      "socialAgentId": {
+        "type": "string",
+        "description": "Agent ID to restrict. Defaults to 'social'."
+      },
+      "allowedPaths": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Paths the social agent is allowed to read (startsWith match after normalization)."
+      }
+    },
+    "additionalProperties": false
+  }
+}
