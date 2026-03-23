@@ -1,4 +1,4 @@
-// read-guardrail plugin for OpenClaw v1.3.4
+// read-guardrail plugin for OpenClaw v1.3.3
 // Enforces workspace-only read access for the social agent.
 // The upstream workspaceOnly config enforces write/edit but NOT read.
 // This plugin fills that gap with a before_tool_call hook.
@@ -28,8 +28,8 @@
 //     W1: Null byte handling added to normalizePath.
 //     W2: Relative path handling documented (blocks correctly).
 //     W3: workspace/ vs workspace-social/ prefix collision documented.
-//         ALWAYS_BLOCKED has /home/walle/.openclaw/workspace/ which does
-//         NOT match /home/walle/.openclaw/workspace-social/ because
+//         ALWAYS_BLOCKED has /home/user/.openclaw/workspace/ which does
+//         NOT match /home/user/.openclaw/workspace-social/ because
 //         startsWith("workspace/") !== startsWith("workspace-social/").
 //         Safe, but close enough to warrant this comment.
 //     W4: image and pdf tool parameter names were WRONG in v1.1.0.
@@ -81,6 +81,24 @@
 //     VALIDATED: ClawBands (SeyZ/clawbands) uses identical before_tool_call
 //         + tool-interceptor.ts pattern. Equilibrium Guard (rizqcon) also
 //         uses this pattern. agent-guardrails (@aporthq) another impl.
+//   v1.3.2: Sixth audit pass (fresh Opus session):
+//     W11-FIX: file:// authority bypass. file://localhost/etc/passwd was
+//         normalized as relative path "localhost/etc/passwd" (workspace
+//         prepended → appeared allowed). RFC 8089 file URIs can have an
+//         authority component: file://host/path. Fixed: after stripping
+//         file://, if result doesn't start with "/", strip authority up to
+//         first "/" (or set empty if no "/" found). file:///path (empty
+//         authority) unaffected. file://AGENTS.md (no path) now correctly
+//         returns "" → blocked. Exploitability depended on image/pdf tool
+//         URI handling, but guardrail should not rely on tool-level safety.
+//   v1.3.3: Deploy cleanup (post-deploy on homeserver):
+//     Removed ALLOWED_KEYS validation loop. api.config is the full global
+//     OpenClaw config, not plugin-scoped config. The loop warned on every
+//     top-level key (meta, gateway, channels, etc.) -- harmless but noisy.
+//     configSchema.additionalProperties: false already validates plugin
+//     config at the gateway level before plugin code loads.
+//     Updated DEPLOYMENT docs with manifest id and plugins.allow
+//     requirements learned during deploy.
 //   v1.3.1: Fifth audit pass, exhaustive input tracing:
 //     W8-FIX: $HOME boundary. startsWith("$HOME") matched $HOME_EXTRA.
 //         Tightened to exact: p === "$HOME" || p.startsWith("$HOME/").
@@ -95,29 +113,13 @@
 //         which produced double-slash for $HOME/foo or missing slash for
 //         bare $HOME. Simplified: slice(5) preserves the / naturally
 //         since "$HOME/" slice(5) = "/", and "$HOME" slice(5) = "".
-//         Now uses HOME_DIR + p.slice(5) which is correct for both.
-//     TRACE: Manually traced 15 input patterns through normalizePath.
-//   v1.3.2: Sixth audit pass (Claude Code, mechanical verification):
-//     W11-FIX: file:// authority bypass. file://localhost/etc/passwd was
-//         normalized as relative path "localhost/etc/passwd" (workspace
-//         prepended, appeared allowed). RFC 8089 file URIs can have an
-//         authority component: file://host/path. Fixed: after stripping
-//         file://, if result doesn't start with "/", strip authority up to
-//         first "/" (or set empty if no "/" found). file:///path (empty
-//         authority) unaffected. file://AGENTS.md (no path) now correctly
-//         returns "" and gets blocked.
-//   v1.3.3: Deploy cleanup (post-deploy on walle):
-//     Removed ALLOWED_KEYS validation loop. api.config is the full global
-//     OpenClaw config, not plugin-scoped config. The loop warned on every
-//     top-level key (meta, gateway, channels, etc.). configSchema validates
-//     at gateway level. Updated DEPLOYMENT docs with manifest id and
-//     plugins.allow requirements learned during deploy.
-//   v1.3.4: GitHub publication prep:
-//     Replaced hardcoded /home/walle/ with HOME_DIR constant derived from
-//     process.env.HOME. Plugin is now portable to any home directory
-//     without source edits for path expansion (~, $HOME, ${HOME}).
-//     DEFAULT_ALLOWED_PATHS and ALWAYS_BLOCKED also use HOME_DIR.
-//     Fixed audit history ordering (v1.3.1 was after v1.3.3).
+//         Now uses "/home/homeserver" + p.slice(5) which is correct for both.
+//     TRACE: Manually traced 15 input patterns through normalizePath:
+//         AGENTS.md, ../workspace/.env, ~/foo, $HOME/foo, $HOME,
+//         $HOME_EXTRA, ${HOME}/foo, ${HOME}, ${HOME_DIR},
+//         file:///home/user/.env, file://foo, ftp://host/path,
+//         /home/user/.openclaw/workspace-social/../workspace/x,
+//         /tmp/ok, ../../../../tmp/x. All resolve correctly.
 //
 // VALIDATED BY: EasyClaw (gaoyangz77/easyclaw) uses identical pattern:
 //   before_tool_call hook intercepting read/write/edit/image/apply_patch
@@ -173,12 +175,12 @@
 //   5. openclaw doctor (may fail with dist/entry.js error, bug #10. OK.)
 //   6. Restart: sudo systemctl restart openclaw
 //   7. Verify: journalctl -u openclaw --since "1 min ago" | grep read-guardrail
-//      Look for "Active v1.3.4" line. No "plugin not found" errors.
+//      Look for "Active v1.3.3" line. No "plugin not found" errors.
 //   8. Test: message social agent in group, ask it to read openclaw.json.
 //      Should get "Access denied" in the response.
 //   9. Test: ask social agent to read SOUL.md. Should succeed (symlink safe).
 //
-// PRE-DEPLOY VERIFICATION (run on walle):
+// PRE-DEPLOY VERIFICATION (run on homeserver):
 //   1. Symlink test: Send social agent a message asking it to read SOUL.md.
 //      If blocked, the hook sees resolved symlink targets (bad). If allowed,
 //      the hook sees workspace-social/SOUL.md (good).
@@ -192,14 +194,9 @@
 //     pdf:   params.pdf (path or URL), params.pdfs (array of paths/URLs)
 //     diffs: params.path (display label, not a file read)
 
-const PLUGIN_VERSION = "1.3.4";
+const PLUGIN_VERSION = "1.3.3";
 
-const DEFAULT_SOCIAL_AGENT_ID = "social";
-
-// Home directory for path expansion (~, $HOME, ${HOME}).
-// Uses process.env.HOME (Linux/macOS) or USERPROFILE (Windows).
-// Plugins run in-process with the gateway, so process.env is available.
-const HOME_DIR = process.env.HOME || process.env.USERPROFILE || "/home/user";
+const DEFAULT_SOCIAL_AGENT_PREFIX = "social-";
 
 // Tools that accept file path parameters and must be guarded.
 // read:  params.path (canonical; file_path aliased to path pre-hook per #5943)
@@ -211,32 +208,30 @@ const HOME_DIR = process.env.HOME || process.env.USERPROFILE || "/home/user";
 //        read-only diff viewer + PNG/PDF renderer. Defense in depth.
 const GUARDED_TOOLS = new Set(["read", "image", "pdf", "diffs"]);
 
-// Paths the social agent is allowed to read.
-// Uses startsWith after path normalization.
-// NOTE: No main workspace paths here. Social reads shared files
-// (SOUL.md, IDENTITY.md, USER.md) via symlinks in workspace-social/.
-// The hook sees the pre-resolution path (workspace-social/SOUL.md),
-// not the symlink target (workspace/SOUL.md).
-const DEFAULT_ALLOWED_PATHS = [
-  HOME_DIR + "/.openclaw/workspace-social/",
-  "/tmp/",
-];
+// Allowed paths are now derived dynamically per-call from the calling
+// agent's ID. Each social-* agent can only read its own workspace:
+//   /home/user/.openclaw/workspace-{agentId}/
+// Plus /tmp/ for transient operations.
+// NOTE: Social reads shared files (SOUL.md, IDENTITY.md, USER.md) via
+// symlinks in their own workspace dir. The hook sees the pre-resolution
+// path (workspace-social-household/SOUL.md), not the symlink target.
 
 // Paths that must NEVER be readable by social, even if they somehow
 // fall within an allowed prefix. Defense in depth.
 //
 // NOTE on workspace/ vs workspace-social/:
-// HOME_DIR + "/.openclaw/workspace/" is blocked here. This does NOT
-// accidentally block workspace-social/ because
-// startsWith("workspace/") !== startsWith("workspace-social/").
-// The trailing slash in the blocked entry is critical.
+// "/home/user/.openclaw/workspace/" is blocked here. This does NOT
+// accidentally block "/home/user/.openclaw/workspace-social/" because
+// startsWith("/home/user/.openclaw/workspace/") returns false for
+// "/home/user/.openclaw/workspace-social/anything". The trailing
+// slash in the blocked entry is critical: "workspace/" != "workspace-social/".
 const ALWAYS_BLOCKED = [
-  HOME_DIR + "/.openclaw/openclaw.json",
-  HOME_DIR + "/.openclaw/.env",
-  HOME_DIR + "/.openclaw/exec-approvals.json",
-  HOME_DIR + "/.openclaw/credentials/",
-  HOME_DIR + "/.openclaw/agents/main/",
-  HOME_DIR + "/.openclaw/workspace/",
+  "/home/user/.openclaw/openclaw.json",
+  "/home/user/.openclaw/.env",
+  "/home/user/.openclaw/exec-approvals.json",
+  "/home/user/.openclaw/credentials/",
+  "/home/user/.openclaw/agents/main/",
+  "/home/user/.openclaw/workspace/",
 ];
 
 function normalizePath(inputPath, workspaceRoot) {
@@ -258,16 +253,16 @@ function normalizePath(inputPath, workspaceRoot) {
   }
   // Expand ~ to home directory. Must be exactly ~ or ~/...
   if (p === "~" || p.startsWith("~/")) {
-    p = HOME_DIR + "/" + p.slice(p === "~" ? 1 : 2);
+    p = "/home/user/" + p.slice(p === "~" ? 1 : 2);
   }
   // Expand $HOME. Boundary: must be exactly $HOME or $HOME/...
   // Without boundary check, $HOME_EXTRA would false-match.
   if (p === "$HOME" || p.startsWith("$HOME/")) {
-    p = HOME_DIR + p.slice(5);
+    p = "/home/homeserver" + p.slice(5);
   }
   // Expand ${HOME}. Same boundary logic.
   if (p === "${HOME}" || p.startsWith("${HOME}/")) {
-    p = HOME_DIR + p.slice(7);
+    p = "/home/homeserver" + p.slice(7);
   }
   // Resolve relative paths against workspace root.
   // The before_tool_call hook sees raw model params. OpenClaw resolves
@@ -308,25 +303,19 @@ export default function register(api) {
   // api.config is the full global OpenClaw config, not plugin-scoped.
   // cfg.socialAgentId and cfg.allowedPaths will always be undefined here
   // (they're not top-level openclaw.json keys), so DEFAULT_ values apply.
-  // This is correct for Eve's setup. If plugin-scoped config is ever needed,
+  // This is correct for the operator's setup. If plugin-scoped config is ever needed,
   // read from api.config?.plugins?.entries?.["read-guardrail"]?.config instead.
   // configSchema.additionalProperties validates plugin config at gateway level.
   const cfg = api.config || {};
 
-  const socialAgentId = cfg.socialAgentId || DEFAULT_SOCIAL_AGENT_ID;
-  const allowedPaths = cfg.allowedPaths || DEFAULT_ALLOWED_PATHS;
-  // Workspace root for resolving relative paths the model might send.
-  // The before_tool_call hook fires BEFORE the tool resolves paths against
-  // the workspace. Without this, "AGENTS.md" -> "/AGENTS.md" -> blocked.
-  const socialWorkspaceRoot = allowedPaths.find((p) => p.includes("workspace")) || allowedPaths[0] || "/";
+  const socialAgentPrefix = cfg.socialAgentPrefix || DEFAULT_SOCIAL_AGENT_PREFIX;
 
   api.logger.info(
     `[read-guardrail] Active v${PLUGIN_VERSION}. ` +
-    `Guarding agent="${socialAgentId}", ` +
+    `Guarding agent="${socialAgentPrefix}*", ` +
     `tools=[${[...GUARDED_TOOLS].join(",")}], ` +
-    `${allowedPaths.length} allowed paths, ` +
     `${ALWAYS_BLOCKED.length} always-blocked paths, ` +
-    `workspaceRoot="${socialWorkspaceRoot}".`
+    `workspaceRoot="dynamic per-agent (~/.openclaw/workspace-{agentId}/)".`
   );
 
   api.on(
@@ -337,7 +326,12 @@ export default function register(api) {
 
       // Only gate the social agent
       const agentId = (ctx as any)?.agentId;
-      if (!agentId || agentId !== socialAgentId) return;
+      if (!agentId || !agentId.startsWith(socialAgentPrefix)) return;
+
+      // Derive allowed paths dynamically from the calling agent's ID.
+      // Each agent can ONLY read its own workspace, not other social agents'.
+      const agentWorkspaceRoot = `/home/user/.openclaw/workspace-${agentId}/`;
+      const allowedPaths = [agentWorkspaceRoot, "/tmp/"];
 
       // Extract file paths from tool params.
       // NOTE: params are post-validation (alias-resolved). file_path is
@@ -400,7 +394,7 @@ export default function register(api) {
 
       // Validate EVERY local path. If any fails, block the entire call.
       for (const rawPath of allLocalPaths) {
-        const normalizedPath = normalizePath(rawPath, socialWorkspaceRoot);
+        const normalizedPath = normalizePath(rawPath, agentWorkspaceRoot);
 
         if (!normalizedPath || normalizedPath === "/") {
           api.logger.warn(

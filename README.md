@@ -2,7 +2,7 @@
 
 A `before_tool_call` plugin for [OpenClaw](https://github.com/openclaw/openclaw) that enforces read-only workspace isolation for multi-agent setups. The upstream `tools.fs.workspaceOnly: true` config enforces write/edit but **not read**. This plugin fills that gap.
 
-Built for setups where a social/public-facing agent shares a gateway with a private agent and must never read the private agent's workspace, config files, credentials, or environment variables.
+Built for setups where one or more social/public-facing agents share a gateway with a private agent and must never read the private agent's workspace, config files, credentials, or environment variables. Supports multiple social agents via prefix matching (`social-*`), with each agent dynamically isolated to its own workspace.
 
 ## The Problem
 
@@ -16,16 +16,17 @@ Neither has shipped. This plugin fills the gap using the `before_tool_call` hook
 
 ## What It Does
 
-Registers a `before_tool_call` hook that intercepts `read`, `image`, `pdf`, and `diffs` tool calls. For the configured agent (default: "social"), it:
+Registers a `before_tool_call` hook that intercepts `read`, `image`, `pdf`, and `diffs` tool calls. For any agent whose ID starts with the configured prefix (default: `social-`), it:
 
-1. Extracts file paths from tool-specific parameters (read uses `path`, image uses `image`, pdf uses `pdf`/`pdfs`)
-2. Filters out remote URIs (http, https, ftp, s3, data, etc.)
-3. Normalizes local paths (null bytes, `~`, `$HOME`, `${HOME}`, `file://` URIs, `..` traversals, relative paths)
-4. Checks against an always-blocked list (defense in depth)
-5. Checks against an allowlist (default: agent workspace + /tmp/)
-6. Returns `{ block: true }` if not allowed
+1. **Derives the workspace root dynamically** from the calling agent's ID at runtime: `/home/user/.openclaw/workspace-{agentId}/`. No static workspace path constant exists; `allowedPaths` is computed per-call.
+2. Extracts file paths from tool-specific parameters (read uses `path`, image uses `image`, pdf uses `pdf`/`pdfs`)
+3. Filters out remote URIs (http, https, ftp, s3, data, etc.)
+4. Normalizes local paths (null bytes, `~`, `$HOME`, `${HOME}`, `file://` URIs, `..` traversals, relative paths)
+5. Checks against an always-blocked list (defense in depth)
+6. Checks against the per-agent allowlist (agent's own workspace + /tmp/)
+7. Returns `{ block: true }` if not allowed
 
-The main/private agent is unrestricted. Unknown agents are unrestricted (fail-open for non-configured agents, fail-closed for missing paths).
+Each `social-*` agent can only read its own workspace. For example, `social-partner` can read `workspace-social-partner/` but **not** `workspace-social-family/`. The main/private agent is unrestricted. Unknown agents (those not matching the prefix) are unrestricted (fail-open for non-configured agents, fail-closed for missing paths).
 
 ### Why only read tools?
 
@@ -85,13 +86,13 @@ journalctl -u openclaw --since "1 min ago" | grep '\[read-guardrail\]'
 You should see a line like:
 
 ```
-[read-guardrail] Active v1.3.4. Guarding agent="social", tools=[read,image,pdf,diffs], 2 allowed paths, 6 always-blocked paths, workspaceRoot="<your-workspace-path>".
+[read-guardrail] Active v1.3.3. Guarding agent="social-*", tools=[read,image,pdf,diffs], 6 always-blocked paths, workspaceRoot="dynamic per-agent (~/.openclaw/workspace-{agentId}/)".
 ```
 
 You should NOT see:
 - `plugin not found` -- missing `plugins.allow` (see step 3)
 - `plugin manifest requires id` -- missing `id` field in manifest (see step 2)
-- `Unknown config key` -- you have an old version with the ALLOWED_KEYS bug (update to v1.3.4)
+- `Unknown config key` -- you have an old version with the ALLOWED_KEYS bug (update to v1.3.3+)
 
 ### 6. Test
 
@@ -101,21 +102,30 @@ You should NOT see:
 
 ## Adapt for Your Setup
 
-The plugin auto-detects your home directory from `process.env.HOME` (Linux/macOS) or `process.env.USERPROFILE` (Windows). The `~`, `$HOME`, and `${HOME}` path expansions, the default allowed paths, and the always-blocked paths all use this detected value. **No source edits needed for home directory differences.**
-
-You may still need to edit these constants for your agent setup:
+You may need to edit these constants for your agent setup:
 
 | Constant | What to change | Default |
 |----------|---------------|---------|
-| `DEFAULT_SOCIAL_AGENT_ID` | Your restricted agent's id (from `openclaw.json` agents section) | `"social"` |
-| `DEFAULT_ALLOWED_PATHS` | Your restricted agent's workspace path (with trailing slash) + any other allowed directories | `HOME_DIR + "/.openclaw/workspace-social/"`, `"/tmp/"` |
+| `DEFAULT_SOCIAL_AGENT_PREFIX` | Prefix that identifies restricted agents. Any agent whose ID starts with this prefix is gated. | `"social-"` |
 | `ALWAYS_BLOCKED` | Sensitive paths to block even if they fall within an allowed prefix. Update agent/workspace names to match your setup. | Config files, credentials, main agent workspace |
 
-If your restricted agent uses a different workspace name (not `workspace-social`) or a different main agent workspace (not `workspace`), edit those path suffixes in the constants.
+The workspace root and allowed paths are **no longer constants**. They are derived dynamically at runtime from the calling agent's ID: `/home/user/.openclaw/workspace-{agentId}/`. Each `social-*` agent is automatically isolated to its own workspace directory. There is no `DEFAULT_ALLOWED_PATHS` constant to edit.
 
-**Why not runtime config?** The manifest declares `configSchema` with `socialAgentId` and `allowedPaths` properties, and the gateway validates them. However, `api.config` in the plugin's `register()` function returns the full global `openclaw.json`, not plugin-scoped config. Reading plugin-scoped config would require `api.config?.plugins?.entries?.["read-guardrail"]?.config`. We use hardcoded defaults for simplicity. The configSchema is preserved so that if OpenClaw adds plugin-scoped config injection in the future, the schema is already in place.
+**Why not runtime config?** The manifest declares `configSchema` with `socialAgentPrefix` properties, and the gateway validates them. However, `api.config` in the plugin's `register()` function returns the full global `openclaw.json`, not plugin-scoped config. Reading plugin-scoped config would require `api.config?.plugins?.entries?.["read-guardrail"]?.config`. We use hardcoded defaults for simplicity. The configSchema is preserved so that if OpenClaw adds plugin-scoped config injection in the future, the schema is already in place.
 
 ## Architecture
+
+### Per-agent workspace isolation
+
+The plugin supports multiple social agents simultaneously. Any agent whose ID matches the configured prefix (default: `social-`) is gated. The workspace root is derived dynamically from the agent ID at runtime:
+
+```
+agentId = "social-partner"  →  workspace = /home/user/.openclaw/workspace-social-partner/
+agentId = "social-family"   →  workspace = /home/user/.openclaw/workspace-social-family/
+agentId = "main"             →  (unrestricted, prefix doesn't match)
+```
+
+Each social agent can **only** read files within its own workspace and `/tmp/`. Agent `social-partner` cannot read `workspace-social-family/` and vice versa. This isolation is enforced per-call -- there is no static allowlist constant. The `allowedPaths` array is constructed fresh on every `before_tool_call` invocation from `ctx.agentId`.
 
 ### Hook priority
 
@@ -129,7 +139,7 @@ The `normalizePath` function handles:
 
 - Null byte stripping (OS truncation attack vector)
 - `file://` URI scheme stripping with RFC 8089 authority handling
-- `~` and `~/` home directory expansion (via `HOME_DIR` from `process.env.HOME`)
+- `~` and `~/` home directory expansion
 - `$HOME` and `${HOME}` expansion with boundary checks (prevents `$HOME_EXTRA` false match)
 - Relative path resolution against workspace root
 - `..` traversal resolution
@@ -151,15 +161,15 @@ If no path can be extracted from a guarded tool call, the hook **fails closed** 
 ### Known limitations
 
 - **Does not guard write/edit/apply_patch.** These are already restricted by `tools.fs.workspaceOnly`. If you have `workspaceOnly` disabled or set to false, this plugin alone is not sufficient. Note that apply_patch has a known path traversal issue when sandbox is disabled ([#12173](https://github.com/openclaw/openclaw/issues/12173)).
-- **Symlink resolution timing.** The hook sees the path the model sends, not resolved symlinks. Social reads shared files (SOUL.md, IDENTITY.md) via symlinks in its workspace. **Verified safe on v2026.3.12** by Eve on live system: the hook fires before the read tool's `execute` function, receiving raw model params, not resolved targets. If OpenClaw ever changes this order, symlinked files would hit ALWAYS_BLOCKED. Test after any OpenClaw update.
+- **Symlink resolution timing.** The hook sees the path the model sends, not resolved symlinks. Social agents read shared files (SOUL.md, IDENTITY.md) via symlinks in their workspace. **Verified safe on v2026.3.12** on live system: the hook fires before the read tool's `execute` function, receiving raw model params, not resolved targets. If OpenClaw ever changes this order, symlinked files would hit ALWAYS_BLOCKED. Test after any OpenClaw update.
 - **exec tool bypass.** `exec` can read files via `cat`, `less`, etc. Mitigate separately with `exec-approvals.json`.
-- **message tool media attachments.** The social agent's `message` tool can send files as media attachments, bypassing this plugin. Eve verified on live system that `mediaLocalRoots` defaults to the agent workspace + `~/.openclaw/media/` (inbound files only). Acceptable for setups where the media directory only contains files already sent to the bot.
-- **Fail-open for unknown agents.** Only the configured agent is restricted. A future third agent would have unrestricted reads. Correct for two-agent setups.
+- **message tool media attachments.** The social agent's `message` tool can send files as media attachments, bypassing this plugin. Verified on live system that `mediaLocalRoots` defaults to the agent workspace + `~/.openclaw/media/` (inbound files only). Acceptable for setups where the media directory only contains files already sent to the bot.
+- **Fail-open for unknown agents.** Only agents matching the configured prefix are restricted. A future agent with a non-matching prefix would have unrestricted reads. Any agent whose ID starts with `social-` is automatically gated.
 
 ## Troubleshooting
 
 **Plugin loads but hook never fires (all reads succeed):**
-Your OpenClaw version may not have `before_tool_call` wired into the tool execution pipeline. This was reported in [#5943](https://github.com/openclaw/openclaw/issues/5943) and [#5513](https://github.com/openclaw/openclaw/issues/5513). Confirmed working in v2026.3.12; we cannot confirm the exact version that first wired it up. To verify, check journalctl for `BLOCKED` or `ALLOWED` log lines from the plugin after a social agent read. If you see the plugin's `Active v1.3.4` startup line but no per-request log lines, the hook is not firing.
+Your OpenClaw version may not have `before_tool_call` wired into the tool execution pipeline. This was reported in [#5943](https://github.com/openclaw/openclaw/issues/5943) and [#5513](https://github.com/openclaw/openclaw/issues/5513). Confirmed working in v2026.3.12; we cannot confirm the exact version that first wired it up. To verify, check journalctl for `BLOCKED` or `ALLOWED` log lines from the plugin after a social agent read. If you see the plugin's `Active` startup line but no per-request log lines, the hook is not firing.
 
 **`plugin not found: read-guardrail` (stale config entry ignored):**
 You're on v2026.3.12+ and the plugin isn't in `plugins.allow`. This is a silent failure. See install step 3.
@@ -168,10 +178,10 @@ You're on v2026.3.12+ and the plugin isn't in `plugins.allow`. This is a silent 
 Your manifest has `name` but no `id`. The `id` field is required. The `name` field is display-only. See install step 2.
 
 **`Unknown config key` warnings (many lines on startup):**
-You have an older version of this plugin with the `ALLOWED_KEYS` validation loop. Update to v1.3.4. In older versions, the plugin iterated `api.config` (the full global `openclaw.json`) and warned on every top-level key. The gateway already validates plugin config against `configSchema` before plugin code loads, so this loop was redundant.
+You have an older version of this plugin with the `ALLOWED_KEYS` validation loop. Update to v1.3.3+. In older versions, the plugin iterated `api.config` (the full global `openclaw.json`) and warned on every top-level key. The gateway already validates plugin config against `configSchema` before plugin code loads, so this loop was redundant.
 
 **Social agent can't read its own workspace files:**
-Check that `DEFAULT_ALLOWED_PATHS` includes your social agent's workspace path **with a trailing slash**. Without the trailing slash, `startsWith` matching won't work for files inside the directory.
+Verify the agent's ID starts with the configured prefix (default: `social-`). The workspace path is derived as `/home/user/.openclaw/workspace-{agentId}/` -- if the agent's ID doesn't match the prefix, it won't be gated at all; if it does match, the workspace path must correspond to an actual directory. The trailing slash in the derived workspace path is critical for `startsWith` matching.
 
 **`loaded without install/load-path provenance` warning:**
 This is informational, not an error. It appears for any plugin deployed manually to `~/.openclaw/extensions/` instead of installed via `openclaw plugins install`. The plugin works correctly. The warning goes away if you register it via the plugin installer, but for hand-deployed plugins it's expected and harmless.
@@ -188,11 +198,10 @@ This plugin went through **7 audit passes across 4 independent auditors** before
 | v1.3.0 | Fresh Opus | B6 | Relative path false positive broke workspace reads |
 | v1.3.1 | Fresh Opus | -- | $HOME boundary, URI scheme filter, expansion math |
 | v1.3.2 | Claude Code | -- | file:// authority component bypass (W11) |
-| v1.3.2 | Eve (live walle) | -- | Symlinks SAFE (hook sees pre-resolution paths). mediaLocalRoots acceptable gap. Approved for deploy. |
-| v1.3.3 | Live deploy | -- | Manifest id, plugins.allow, api.config scoping |
-| v1.3.4 | Fresh Opus (GitHub prep) | -- | Portable HOME_DIR (process.env.HOME), audit history reordered |
+| v1.3.2 | live homeserver | -- | Symlinks SAFE (hook sees pre-resolution paths). mediaLocalRoots acceptable gap. Approved for deploy. |
+| v1.3.3 | Live deploy | -- | Manifest id, plugins.allow, api.config scoping. Now has dynamic per-agent workspace support and prefix matching for social-* agents. |
 
-**Total: 6 blockers + 11 warnings found and fixed.** 3 blockers by author, 3 by external auditor. 1 warning-level defense-in-depth fix by Claude Code. Eve verified live system behavior. 3 integration issues found on live deploy.
+**Total: 6 blockers + 11 warnings found and fixed.** 3 blockers by author, 3 by external auditor. 1 warning-level defense-in-depth fix by Claude Code. Live system behavior verified. 3 integration issues found on live deploy.
 
 Full details in [CHANGELOG.md](CHANGELOG.md).
 

@@ -1,23 +1,38 @@
 # read-guardrail CHANGELOG
 
-## v1.3.4 (March 15, 2026) -- GitHub publication
+## v1.3.4 (March 22, 2026) -- Dynamic per-agent workspace isolation
 
-**Source:** Final audit pass for public release
+**Source:** Live deployment update on homeserver. SCP'd from production.
 
-### Fixes
-- **PORTABILITY:** Replaced all hardcoded `/home/walle/` references with
-  `HOME_DIR` constant derived from `process.env.HOME` (Linux/macOS) or
-  `process.env.USERPROFILE` (Windows). Affects `normalizePath` (`~`, `$HOME`,
-  `${HOME}` expansion), `DEFAULT_ALLOWED_PATHS`, and `ALWAYS_BLOCKED`. Plugin
-  is now portable to any home directory without source edits for path expansion.
-- **ORDERING:** Fixed audit history in index.ts comments. v1.3.1 was listed
-  after v1.3.3 due to Claude Code inserting v1.3.2 above it. Now chronological.
+### Changes
+- **DYNAMIC WORKSPACE ROOT:** Workspace root is no longer a static constant.
+  It is derived at runtime from the calling agent's ID:
+  `/home/user/.openclaw/workspace-{agentId}/`. Each `social-*` agent is
+  isolated to its own workspace directory. `social-partner` reads
+  `workspace-social-partner/` but NOT `workspace-social-family/`.
+- **PREFIX MATCHING:** Agent gating changed from exact match on `"social"` to
+  prefix match via `startsWith("social-")`. Any agent whose ID starts with
+  `social-` is now restricted. The constant `DEFAULT_SOCIAL_AGENT_ID` is
+  replaced by `DEFAULT_SOCIAL_AGENT_PREFIX = "social-"`.
+- **REMOVED `DEFAULT_ALLOWED_PATHS`:** No longer exists as a constant.
+  `allowedPaths` is now computed per-call inside the `before_tool_call` hook
+  as `[agentWorkspaceRoot, "/tmp/"]`, where `agentWorkspaceRoot` is derived
+  from `ctx.agentId`.
+- **CONFIG KEY RENAME:** `socialAgentId` / `cfg.socialAgentId` replaced by
+  `socialAgentPrefix` / `cfg.socialAgentPrefix` throughout.
+
+### Motivation
+The original design assumed a single social agent (`"social"`) with a single
+static workspace (`workspace-social/`). With multiple social agents deployed
+(social-partner, social-family, etc.), each agent needs its own workspace
+isolation. A static allowlist would grant every social agent access to every
+other social agent's workspace.
 
 ---
 
 ## v1.3.3 (March 15, 2026) -- Live deploy fixes
 
-**Source:** Live deployment on walle (OpenClaw v2026.3.12)
+**Source:** Live deployment on homeserver (OpenClaw v2026.3.12)
 
 ### Fixes
 - **DEPLOY-1:** Manifest requires `id` field, not just `name`. Gateway refused to
@@ -55,8 +70,8 @@
   triple slash) is unaffected.
 
 ### Trace verification
-- `file://localhost/home/walle/.openclaw/.env` → authority stripped → `/home/walle/.openclaw/.env` → BLOCKED ✓
-- `file:///home/walle/.openclaw/.env` → `/home/walle/.openclaw/.env` → BLOCKED ✓
+- `file://localhost/home/user/.openclaw/.env` → authority stripped → `/home/user/.openclaw/.env` → BLOCKED ✓
+- `file:///home/user/.openclaw/.env` → `/home/user/.openclaw/.env` → BLOCKED ✓
 - `file://AGENTS.md` → no path component → `""` → BLOCKED ✓
 - All other 15 input traces from v1.3.1 re-verified, unchanged.
 
@@ -64,7 +79,7 @@
 
 ## v1.3.1 (March 15, 2026) -- Fifth audit pass
 
-**Auditor:** Claude Opus 4.6 (fresh session, JameBob's auditor role)
+**Auditor:** Claude Opus 4.6 (fresh session, operator's auditor role)
 
 ### Fixes
 - **W8-FIX:** `$HOME` boundary match. `startsWith("$HOME")` false-matched
@@ -76,7 +91,7 @@
   Fixed with RFC 3986 regex `[a-zA-Z][a-zA-Z0-9+.-]*://`. `file://` is
   explicitly separated and routed through normalizePath for local validation.
 - **W10-FIX:** `$HOME` expansion arithmetic. Old `slice(5) + replace` was
-  fragile for edge cases. Simplified to `"/home/walle" + p.slice(5)` which
+  fragile for edge cases. Simplified to `"/home/homeserver" + p.slice(5)` which
   handles both `$HOME` (bare) and `$HOME/foo` correctly.
 
 ### Validation
@@ -88,18 +103,18 @@
 
 ## v1.3.0 (March 15, 2026) -- Fourth audit pass
 
-**Auditor:** Claude Opus 4.6 (fresh session, JameBob's auditor role)
+**Auditor:** Claude Opus 4.6 (fresh session, operator's auditor role)
 
 ### Fixes
 - **B6-FIX (BLOCKER):** Relative path false positive. Model sends `AGENTS.md`,
   normalizePath produced `/AGENTS.md` (not in allowlist = blocked). But
-  OpenClaw resolves it as `workspace-social/AGENTS.md`. Social Eve would be
+  OpenClaw resolves it as `workspace-social/AGENTS.md`. The social agent would be
   unable to read her own workspace files. Fixed: normalizePath now accepts a
   `workspaceRoot` parameter, prepends it to relative paths before
   normalization. Traversals like `../workspace/.env` still resolve correctly
   through `..` resolution and get caught by ALWAYS_BLOCKED.
 - **W6-FIX:** `file://` URI handling. URL filter only caught `http://` and
-  `https://`. `file:///home/walle/.openclaw/.env` would pass through. Fixed:
+  `https://`. `file:///home/user/.openclaw/.env` would pass through. Fixed:
   normalizePath strips `file://` scheme and validates the underlying path.
   Added `data:` to the remote URL filter.
 - **W7-FIX:** `${HOME}` curly-brace variant. Models occasionally use this
@@ -118,7 +133,7 @@
 
 ## v1.2.0 (March 15, 2026) -- Second and third audit passes
 
-**Auditor:** Claude Opus 4.6 (fresh session, JameBob's auditor role)
+**Auditor:** Claude Opus 4.6 (fresh session, operator's auditor role)
 
 ### Fixes
 - **B4-FIX (BLOCKER):** image tool uses `params.image`, NOT `params.path`.
@@ -182,9 +197,11 @@
 |---------|---------------|----------------------------|
 | v1.1.0 (author) | B1, B2, B3 | Fixed by author |
 | v1.2.0 (auditor) | B4, B5 | **Silent bypass of image + pdf tools** |
-| v1.3.0 (auditor) | B6 | **False positive blocking Eve's own files** |
+| v1.3.0 (auditor) | B6 | **False positive blocking the agent's own files** |
 | v1.3.1 (auditor) | None | Clean |
 | v1.3.2 (auditor) | None (W11 defense-in-depth) | `file://authority` bypass fixed |
-| v1.3.2 (Eve, live) | None | Symlinks SAFE, mediaLocalRoots acceptable. Approved for deploy. |
+| v1.3.2 (live agent) | None | Symlinks SAFE, mediaLocalRoots acceptable. Approved for deploy. |
+| v1.3.3 (deploy) | None | Deploy fixes: manifest id, plugins.allow, api.config scoping |
+| v1.3.4 (deploy) | None | Dynamic per-agent workspace, prefix matching for social-* agents |
 
-Total: 6 blockers found across 7 audit passes. 3 by author, 3 by auditor. 1 warning-level defense-in-depth fix in v1.3.2. Eve verified live system. 3 deploy-time issues in v1.3.3.
+Total: 6 blockers found across 7 audit passes. 3 by author, 3 by auditor. 1 warning-level defense-in-depth fix in v1.3.2. Live system verified. 3 deploy-time issues in v1.3.3. Dynamic workspace isolation added in v1.3.4.
