@@ -158,11 +158,15 @@ Param names verified from [docs.openclaw.ai/tools](https://docs.openclaw.ai/tool
 
 If no path can be extracted from a guarded tool call, the hook **fails closed** (blocks the call).
 
+### Scope and limitations
+
+**This plugin intercepts the `read`, `image`, `pdf`, and `diffs` tools only.** It does NOT intercept `exec`. When an agent runs a command via `exec` (e.g., `python3 /path/to/script.py`), the executed process reads files through the OS kernel, bypassing this plugin entirely. The `exec` tool's security boundary is `exec-approvals.json`, which controls which binaries each agent can execute. If your social agents have `exec` in their tool allow list, ensure exec-approvals restricts them to specific binaries (e.g., `python3` only).
+
 ### Known limitations
 
 - **Does not guard write/edit/apply_patch.** These are already restricted by `tools.fs.workspaceOnly`. If you have `workspaceOnly` disabled or set to false, this plugin alone is not sufficient. Note that apply_patch has a known path traversal issue when sandbox is disabled ([#12173](https://github.com/openclaw/openclaw/issues/12173)).
 - **Symlink resolution timing.** The hook sees the path the model sends, not resolved symlinks. Social agents read shared files (SOUL.md, IDENTITY.md) via symlinks in their workspace. **Verified safe on v2026.3.12** on live system: the hook fires before the read tool's `execute` function, receiving raw model params, not resolved targets. If OpenClaw ever changes this order, symlinked files would hit ALWAYS_BLOCKED. Test after any OpenClaw update.
-- **exec tool bypass.** `exec` can read files via `cat`, `less`, etc. Mitigate separately with `exec-approvals.json`.
+- **exec tool bypass.** `exec` can read files via `cat`, `less`, etc. This is the most significant gap. Mitigate with `exec-approvals.json` by restricting social agents to specific binaries. The read-guardrail and exec-approvals are complementary: read-guardrail controls the `read` tool, exec-approvals controls the `exec` tool. Neither covers the other's surface.
 - **message tool media attachments.** The social agent's `message` tool can send files as media attachments, bypassing this plugin. Verified on live system that `mediaLocalRoots` defaults to the agent workspace + `~/.openclaw/media/` (inbound files only). Acceptable for setups where the media directory only contains files already sent to the bot.
 - **Fail-open for unknown agents.** Only agents matching the configured prefix are restricted. A future agent with a non-matching prefix would have unrestricted reads. Any agent whose ID starts with `social-` is automatically gated.
 
