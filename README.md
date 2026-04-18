@@ -1,3 +1,5 @@
+> **Archived April 2026.** Built on [OpenClaw](https://github.com/openclaw/openclaw) and moved off of it when the active work migrated to [Hermes](https://github.com/hermes-agent/hermes-agent). The design ideas in this repo might still be useful. The platform wiring is obsolete.
+
 # openclaw-read-guardrail
 
 A `before_tool_call` plugin for [OpenClaw](https://github.com/openclaw/openclaw) that enforces read-only workspace isolation for multi-agent setups. The upstream `tools.fs.workspaceOnly: true` config enforces write/edit but **not read**. This plugin fills that gap.
